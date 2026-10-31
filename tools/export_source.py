@@ -23,7 +23,7 @@ def main():
         parser.error("destination must be outside the source project")
     paths = [root / n for n in ("Cargo.toml", "LICENSE", "README.md", "VALIDATION.md")]
     paths += sorted((root / "src").rglob("*.rs"))
-    files = {str(p.relative_to(root)): p.read_bytes() for p in paths}
+    files = {p.relative_to(root).as_posix(): p.read_bytes() for p in paths}
     manifest = {
         "source": "rustclipsync-core",
         "version": tomllib.loads(files["Cargo.toml"].decode())["package"]["version"],
@@ -37,7 +37,7 @@ def main():
             if path.is_symlink():
                 parser.error("snapshot contains a symlink")
             if path.is_file():
-                actual[str(path.relative_to(dest))] = path.read_bytes()
+                actual[path.relative_to(dest).as_posix()] = path.read_bytes()
     if args.check:
         if files != actual:
             parser.exit(1, "Shared core snapshot differs; regenerate it from rustclipsync-core.\n")
