@@ -62,7 +62,7 @@ python3 tests/server_e2e.py ../rustclipsync-server/target/release/rustclipsync-s
 rustclipsync-core = { version = "=0.1.0", path = "../rustclipsync-core" }
 ```
 
-源码仓库为 [Infinifar/rustclipsync-core](https://github.com/Infinifar/rustclipsync-core)，当前以私有仓库管理，尚未发布 crates.io 包。为了让 Omaclipsync 的独立检出和源码发布包仍可编译，它消费 `core/vendor/rustclipsync-core` 的自动导出快照：
+源码仓库为 [Infinifar/rustclipsync-core](https://github.com/Infinifar/rustclipsync-core)，以 MIT 许可证公开开源，尚未发布 crates.io 包。为了让 Omaclipsync 的独立检出和源码发布包仍可编译，它消费 `core/vendor/rustclipsync-core` 的自动导出快照：
 
 ```bash
 python3 tools/export_source.py ../omarchy-plugins-dev/io.github.infinifar.omaclipsync/core/vendor/rustclipsync-core
