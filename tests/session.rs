@@ -203,12 +203,15 @@ impl Fixture {
         }
     }
     fn open(&self) -> TestSession {
+        self.open_sensitive(false)
+    }
+    fn open_sensitive(&self, allow_sensitive: bool) -> TestSession {
         Session::open(
             SessionConfig {
                 server: "https://example.test".into(),
                 encryption_key: self.key,
                 filter: Filter::new(FilterMode::Off, &[], false).unwrap(),
-                allow_sensitive: false,
+                allow_sensitive,
             },
             self.remote.clone(),
             self.store.clone(),
@@ -461,4 +464,52 @@ fn oversize_text_never_enters_outbox() {
         Err(SyncError::Remote(Error::TooLarge))
     ));
     assert!(s.persisted.state.pending.is_none());
+}
+
+#[test]
+fn private_sensitive_receive_is_durable_skipped_and_never_writes_clipboard() {
+    let f = Fixture::new();
+    let mut s = f.open_sensitive(true);
+    s.check().unwrap();
+    s.use_sensitive_inbox(true);
+    f.remote.publish("sensitive fixture", true);
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Stored);
+    assert_eq!(f.clipboard.writes.get(), 0);
+    assert_eq!(s.persisted.state.ack.as_ref().unwrap().result, "skipped");
+    let inbox = s.persisted.inbox.clone().unwrap();
+    assert_eq!(inbox.text, "sensitive fixture");
+    assert!(s.persisted.notification_identity().inbox.is_none());
+    let raw = f.store.bytes.borrow().clone().unwrap();
+    assert!(!raw.windows(17).any(|x| x == b"sensitive fixture"));
+    drop(s);
+    let mut reopened = f.open_sensitive(true);
+    reopened.use_sensitive_inbox(true);
+    assert_eq!(reopened.persisted.inbox.as_ref(), Some(&inbox));
+    reopened.flush(0).unwrap();
+    assert_eq!(reopened.pull(0, Instant::now()).unwrap(), Outcome::Current);
+    assert_eq!(f.clipboard.writes.get(), 0);
+    assert!(!reopened.clear_inbox("stale-id").unwrap());
+    assert!(reopened.clear_inbox(&inbox.id).unwrap());
+    assert!(f.open_sensitive(true).persisted.inbox.is_none());
+}
+#[test]
+fn failed_private_inbox_commit_does_not_ack_or_apply_and_can_recover() {
+    let f = Fixture::new();
+    let mut s = f.open_sensitive(true);
+    s.check().unwrap();
+    s.use_sensitive_inbox(true);
+    f.remote.publish("sensitive fixture", true);
+    f.store.fail.set(true);
+    assert!(matches!(
+        s.pull(0, Instant::now()),
+        Err(SyncError::Storage(_))
+    ));
+    assert_eq!(f.clipboard.writes.get(), 0);
+    assert!(f.remote.data.lock().unwrap().acknowledgements.is_empty());
+    f.store.fail.set(false);
+    drop(s);
+    let mut s = f.open_sensitive(true);
+    s.use_sensitive_inbox(true);
+    assert!(s.persisted.inbox.is_none());
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Stored);
 }
