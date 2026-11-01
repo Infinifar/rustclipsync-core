@@ -6,6 +6,10 @@ RustClipSync 客户端的共享 Rust 核心，从 Omaclipsync 0.2.0 的现有同
 Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分别实现操作系统适配层。
 这是客户端库，不是服务端，也不是独立桌面应用。
 
+## 当前接口
+
+全部网络操作使用 `/api/...`。迁移接口地址时，服务端和各客户端需要配套更新；设备身份、游标与加密状态格式保持不变。Rust 桌面端和 Omaclipsync 消费本仓库的导出快照，接口逻辑只在本仓库修改并重新导出。
+
 ## 已抽取的内容
 
 | 模块 | 职责 |
@@ -19,7 +23,7 @@ Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分�
 
 没有 Wayland、WinUI、Windows API、Secret Service、托盘或文件路径依赖。构造会话会加载或创建加密状态，但不联网、不读取或写入剪贴板。宿主在专用工作线程串行调用同步方法；不要从 UI 线程调用阻塞网络操作。
 
-当前库版本 `0.2.0` 表示共享 Rust API 的版本，与服务端及客户端的正式产品版本独立。HTTP 路径沿用 `/v1/`，不代表另一个未发布产品。
+当前库版本 `0.3.0` 表示共享 Rust API 的版本，与服务端及客户端的正式产品版本独立。HTTP 统一使用 `/api/` 前缀，不再提供协议版本选择。
 
 ## 适配边界
 
@@ -37,7 +41,7 @@ Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分�
 
 ## 协议和隐私约束
 
-- 对接 [RustClipSync 服务端](https://github.com/Infinifar/rustclipsync-server) 及其 [接口协议](https://github.com/Infinifar/rustclipsync-server/blob/main/PROTOCOL-V1.md)，没有加入旧 SyncClipboard HTTP/SignalR 传输实现。
+- 对接 [RustClipSync 服务端](https://github.com/Infinifar/rustclipsync-server) 及其 [接口协议](https://github.com/Infinifar/rustclipsync-server/blob/main/PROTOCOL.md)，没有加入旧 SyncClipboard HTTP/SignalR 传输实现。
 - UUID 标识一次复制事件；重试保留 UUID。revision 排序，epoch 隔离服务端重置；客户端时间仅用于重试有效期，不能用来排序或生成唯一性保证。
 - 自动上传不静默覆盖冲突；离线只同步最新值。发送结果未知时保留原请求，先确认/取消后才处理新的最后一条。
 - 已接收消息通过持久化游标与确认避免重放。崩溃时无法判断是否成功写入的消息恢复为 `skipped`，不能承诺系统剪贴板副作用严格 exactly-once。
@@ -65,7 +69,7 @@ python3 tests/server_e2e.py ../rustclipsync-server/target/release/rustclipsync-s
 相邻仓库本地开发可以使用：
 
 ```toml
-rustclipsync-core = { version = "=0.2.0", path = "../rustclipsync-core" }
+rustclipsync-core = { version = "=0.3.0", path = "../rustclipsync-core" }
 ```
 
 源码仓库为 [Infinifar/rustclipsync-core](https://github.com/Infinifar/rustclipsync-core)，以 MIT 许可证公开开源，尚未发布 crates.io 包。为了让 Omaclipsync 的独立检出和源码发布包仍可编译，它消费 `core/vendor/rustclipsync-core` 的自动导出快照：
@@ -87,4 +91,4 @@ MIT 许可，原始实现来源：`Infinifar/omaclipsync`，提取基线提交 `
 
 客户端可调用 `Session::use_sensitive_inbox(true)`：启用敏感同步时，收到的敏感正文与接收游标在同一次加密状态提交中保存，确认使用 `skipped`，不声称已经写入系统剪贴板。只保留最后一项；`clear_inbox(id)` 不重置游标。默认接收行为不变。`HistorySink::record_marked` 允许平台将敏感正文排除出普通历史；通知身份不携带收件正文。
 
-新增 `Persisted.inbox` 字段，旧加密文件默认读取为空；状态上限调整为 64 MiB，以容纳最坏情况下的待发送项、替换项和私有收件项。该 Rust API 变更以 crate 0.2.0 发布，服务端 HTTP 协议不变。Omaclipsync 0.2.1 仍使用自己的 0.1.0 源码快照。
+新增 `Persisted.inbox` 字段，旧加密文件默认读取为空；状态上限调整为 64 MiB，以容纳最坏情况下的待发送项、替换项和私有收件项。该 Rust API 变更以 crate 0.2.0 发布，服务端 HTTP 协议不变。
