@@ -29,6 +29,8 @@ The current library version, `0.2.0`, identifies the shared Rust API independent
 
 On a state persistence error, pause and rebuild the session instead of continuing with in-memory state that may be ahead of disk. On first startup, do not mistake existing clipboard content for a new copy event. Notifications are wake-up signals; the epoch and revision returned by `state` determine synchronization.
 
+Synchronization entry points check restored pending content against the current clipboard before sending. `flush` applies the current sensitive-content and regex policies to the latest queued value. An oversized new copy also supersedes the old value; uncertain uploads are resolved through cancellation before they are discarded. If a clipboard write returns an error, the session durably records it as `skipped` before returning the error, so later receives can continue without replaying the ambiguous write. A failure to save that recovery is a state persistence error and requires rebuilding the session.
+
 ## Protocol and privacy constraints
 
 - Connects to the [RustClipSync server](https://github.com/Infinifar/rustclipsync-server) using its [protocol](https://github.com/Infinifar/rustclipsync-server/blob/main/PROTOCOL-V1.md). Legacy SyncClipboard HTTP/SignalR transport is not implemented.

@@ -22,13 +22,16 @@ use std::{
 struct MemoryStore {
     bytes: Rc<RefCell<Option<Vec<u8>>>>,
     fail: Rc<Cell<bool>>,
+    saves: Rc<Cell<usize>>,
+    fail_on_save: Rc<Cell<Option<usize>>>,
 }
 impl StateStore for MemoryStore {
     fn load(&self) -> io::Result<Option<Vec<u8>>> {
         Ok(self.bytes.borrow().clone())
     }
     fn save(&self, bytes: &[u8]) -> io::Result<()> {
-        if self.fail.get() {
+        self.saves.set(self.saves.get() + 1);
+        if self.fail.get() || self.fail_on_save.get() == Some(self.saves.get()) {
             return Err(io::Error::other("fixture disk failure"));
         }
         *self.bytes.borrow_mut() = Some(bytes.to_vec());
@@ -40,9 +43,16 @@ struct MemoryClipboard {
     value: Rc<RefCell<Option<(String, bool)>>>,
     writes: Rc<Cell<usize>>,
     fail: Rc<Cell<bool>>,
+    fail_after_write: Rc<Cell<bool>>,
+    snapshots: Rc<Cell<usize>>,
+    fail_on_snapshot: Rc<Cell<Option<usize>>>,
 }
 impl Clipboard for MemoryClipboard {
     fn snapshot(&self, allow: bool) -> Result<Option<(String, bool)>, ClipboardError> {
+        self.snapshots.set(self.snapshots.get() + 1);
+        if self.fail_on_snapshot.get() == Some(self.snapshots.get()) {
+            return Err(ClipboardError::Unavailable);
+        }
         if !allow && self.value.borrow().as_ref().is_some_and(|v| v.1) {
             return Err(ClipboardError::Sensitive);
         }
@@ -54,6 +64,9 @@ impl Clipboard for MemoryClipboard {
         }
         self.writes.set(self.writes.get() + 1);
         *self.value.borrow_mut() = Some((text.into(), sensitive));
+        if self.fail_after_write.get() {
+            return Err(ClipboardError::Timeout);
+        }
         Ok(())
     }
 }
@@ -512,4 +525,285 @@ fn failed_private_inbox_commit_does_not_ack_or_apply_and_can_recover() {
     s.use_sensitive_inbox(true);
     assert!(s.persisted.inbox.is_none());
     assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Stored);
+}
+
+#[test]
+fn regression_new_filter_applies_to_pending_upload() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "private-token");
+    s.update_policy(
+        Filter::new(FilterMode::Blacklist, &["private".into()], true).unwrap(),
+        false,
+    );
+    s.flush(0).unwrap();
+    assert!(
+        f.remote.data.lock().unwrap().sends.is_empty(),
+        "new blacklist must prevent previously queued matching text from being uploaded"
+    );
+}
+
+#[test]
+fn regression_clipboard_failure_does_not_wedge_future_pulls() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.remote.publish("first", false);
+    f.clipboard.fail.set(true);
+    assert!(matches!(
+        s.pull(0, Instant::now()),
+        Err(SyncError::Clipboard(_))
+    ));
+    f.clipboard.fail.set(false);
+    f.remote.publish("second", false);
+    let outcome = s.pull(0, Instant::now()).unwrap();
+    assert_eq!(
+        outcome,
+        Outcome::Downloaded,
+        "a later remote message must be receivable after the clipboard recovers"
+    );
+}
+
+#[test]
+fn regression_slow_pull_does_not_expire_echo_before_write() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.remote.publish("remote", false);
+    let request_started = Instant::now() - std::time::Duration::from_secs(6);
+    assert_eq!(s.pull(0, request_started).unwrap(), Outcome::Downloaded);
+    let id = s.persisted.state.ack.as_ref().unwrap().id.clone();
+    let outcome = s
+        .record_local("remote", Some(&id), false, Instant::now())
+        .unwrap();
+    assert_eq!(
+        outcome,
+        Outcome::Skipped,
+        "echo window must start when clipboard is written, rather than when network request began"
+    );
+}
+
+#[test]
+fn regression_oversize_new_copy_does_not_send_old_copy() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "old");
+    let oversize = "x".repeat(MAX_TEXT_BYTES + 1);
+    *f.clipboard.value.borrow_mut() = Some((oversize.clone(), false));
+    assert!(matches!(
+        s.record_local(&oversize, None, false, Instant::now()),
+        Err(SyncError::Remote(Error::TooLarge))
+    ));
+    s.flush(0).unwrap();
+    assert!(
+        f.remote.data.lock().unwrap().sends.is_empty(),
+        "the superseded clipboard value must not be uploaded"
+    );
+}
+
+#[test]
+fn regression_reopened_paired_session_checks_pending_before_flush() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "old");
+    drop(s);
+    *f.clipboard.value.borrow_mut() = None;
+    let mut reopened = f.open();
+    reopened.flush(0).unwrap();
+    assert!(
+        f.remote.data.lock().unwrap().sends.is_empty(),
+        "flush must check restored pending against current clipboard even when already paired"
+    );
+}
+
+#[test]
+fn policy_change_resolves_uncertain_upload_without_resending_filtered_text() {
+    for committed in [false, true] {
+        for latest_allowed in [false, true] {
+            let f = Fixture::new();
+            let mut s = f.open();
+            s.check().unwrap();
+            f.copy(&mut s, "private-old");
+            if committed {
+                f.remote.lose_response.store(true, Ordering::SeqCst);
+                assert!(s.flush(0).is_err());
+            } else {
+                // Persist an attempted request without sending it, as if it
+                // never reached the server before cancellation became necessary.
+                assert_eq!(s.flush(1).unwrap(), Outcome::Skipped);
+            }
+            let sends_before = f.remote.data.lock().unwrap().sends.len();
+            let latest = if latest_allowed {
+                "public-new"
+            } else {
+                "private-new"
+            };
+            f.copy(&mut s, latest);
+            s.update_policy(
+                Filter::new(FilterMode::Blacklist, &["private".into()], false).unwrap(),
+                false,
+            );
+            assert_eq!(s.flush(0).unwrap(), Outcome::Current);
+            assert_eq!(f.remote.data.lock().unwrap().sends.len(), sends_before);
+            assert_eq!(
+                s.flush(0).unwrap(),
+                if latest_allowed {
+                    Outcome::Uploaded
+                } else {
+                    Outcome::Current
+                }
+            );
+            let d = f.remote.data.lock().unwrap();
+            assert_eq!(
+                d.sends.len(),
+                sends_before + usize::from(latest_allowed),
+                "committed={committed}, latest_allowed={latest_allowed}"
+            );
+            if latest_allowed {
+                assert_eq!(d.sends.last().unwrap().copy.text, "public-new");
+            }
+            assert!(s.persisted.state.pending.is_none());
+        }
+    }
+}
+
+#[test]
+fn oversize_copy_cancels_uncertain_upload_and_survives_restart() {
+    for committed in [false, true] {
+        let f = Fixture::new();
+        let mut s = f.open();
+        s.check().unwrap();
+        f.copy(&mut s, "old");
+        if committed {
+            f.remote.lose_response.store(true, Ordering::SeqCst);
+            assert!(s.flush(0).is_err());
+        } else {
+            assert_eq!(s.flush(1).unwrap(), Outcome::Skipped);
+        }
+        f.copy(&mut s, "queued");
+        let sends_before = f.remote.data.lock().unwrap().sends.len();
+        assert!(matches!(
+            s.record_local(&"x".repeat(MAX_TEXT_BYTES + 1), None, false, Instant::now()),
+            Err(SyncError::Remote(Error::TooLarge))
+        ));
+        drop(s);
+        let mut s = f.open();
+        s.flush(0).unwrap();
+        s.flush(0).unwrap();
+        assert!(!s.has_pending(), "committed={committed}");
+        assert_eq!(f.remote.data.lock().unwrap().sends.len(), sends_before);
+    }
+}
+
+#[test]
+fn oversize_copy_reports_storage_failure_if_discard_cannot_be_persisted() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "old");
+    f.store.fail.set(true);
+    assert!(matches!(
+        s.record_local(&"x".repeat(MAX_TEXT_BYTES + 1), None, false, Instant::now()),
+        Err(SyncError::Storage(_))
+    ));
+    assert!(f.remote.data.lock().unwrap().sends.is_empty());
+}
+
+#[test]
+fn ambiguous_write_is_skipped_durably_without_replay_in_same_session() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.remote.publish("ambiguous", false);
+    f.clipboard.fail_after_write.set(true);
+    assert!(matches!(
+        s.pull(0, Instant::now()),
+        Err(SyncError::Clipboard(ClipboardError::Timeout))
+    ));
+    f.clipboard.fail_after_write.set(false);
+    s.flush(0).unwrap();
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Current);
+    assert_eq!(f.clipboard.writes.get(), 1);
+    assert_eq!(
+        f.remote.data.lock().unwrap().acknowledgements[0].result,
+        "skipped"
+    );
+    drop(s);
+    let mut s = f.open();
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Current);
+    assert_eq!(f.clipboard.writes.get(), 1);
+}
+
+#[test]
+fn failed_write_recovery_save_reports_storage_and_preserves_crash_journal() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.remote.publish("ambiguous", false);
+    f.clipboard.fail_after_write.set(true);
+    f.store.fail_on_save.set(Some(f.store.saves.get() + 2));
+    assert!(matches!(
+        s.pull(0, Instant::now()),
+        Err(SyncError::Storage(_))
+    ));
+    assert!(f.remote.data.lock().unwrap().acknowledgements.is_empty());
+    drop(s);
+    f.clipboard.fail_after_write.set(false);
+    f.store.fail_on_save.set(None);
+    let mut s = f.open();
+    s.flush(0).unwrap();
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Current);
+    assert_eq!(f.clipboard.writes.get(), 1);
+    assert_eq!(
+        f.remote.data.lock().unwrap().acknowledgements[0].result,
+        "skipped"
+    );
+}
+
+#[test]
+fn final_snapshot_failure_releases_journal_without_skipping_unwritten_message() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.remote.publish("retry me", false);
+    f.clipboard
+        .fail_on_snapshot
+        .set(Some(f.clipboard.snapshots.get() + 3));
+    assert!(matches!(
+        s.pull(0, Instant::now()),
+        Err(SyncError::Clipboard(_))
+    ));
+    assert_eq!(f.clipboard.writes.get(), 0);
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Downloaded);
+    assert_eq!(f.clipboard.writes.get(), 1);
+}
+
+#[test]
+fn restored_matching_pending_is_sent_without_explicit_check() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "still current");
+    let id = s.persisted.state.pending.as_ref().unwrap().copy.id.clone();
+    drop(s);
+    let mut s = f.open();
+    assert_eq!(s.flush(0).unwrap(), Outcome::Uploaded);
+    assert_eq!(f.remote.data.lock().unwrap().sends[0].copy.id, id);
+}
+
+#[test]
+fn restored_stale_pending_does_not_block_direct_pull() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "old local");
+    drop(s);
+    *f.clipboard.value.borrow_mut() = None;
+    f.remote.publish("new remote", false);
+    let mut s = f.open();
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Downloaded);
+    assert!(f.remote.data.lock().unwrap().sends.is_empty());
 }

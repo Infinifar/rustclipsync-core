@@ -31,6 +31,8 @@ Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分�
 
 状态保存错误必须暂停并重建会话，不能继续用可能领先磁盘的内存状态。首次启动不能把原有系统剪贴板误当作新复制事件。通知只是唤醒信号，`state` 返回的 epoch 和 revision 才是同步依据。
 
+同步入口会在发送前，将重启恢复的待发内容与当前剪贴板核对。`flush` 对最新待发内容重新应用当前敏感策略和正则过滤规则。新的超大复制也会淘汰旧内容；结果未知的上传仍通过取消接口确认后才能丢弃。剪贴板写入返回错误时，会话先持久化 `skipped` 再返回错误，让后续接收继续运行且不重放结果不明的写入；如果恢复状态保存失败，则按状态保存错误处理并重建会话。
+
 ## 协议和隐私约束
 
 - 对接 [RustClipSync 服务端](https://github.com/Infinifar/rustclipsync-server) 及其 [接口协议](https://github.com/Infinifar/rustclipsync-server/blob/main/PROTOCOL-V1.md)，没有加入旧 SyncClipboard HTTP/SignalR 传输实现。
