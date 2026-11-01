@@ -173,3 +173,49 @@ fn dropping_worker_stops_terminal_notification_retry_with_full_queue() {
         Err(mpsc::RecvTimeoutError::Disconnected)
     );
 }
+
+#[test]
+fn shutdown_and_join_wait_for_inflight_transport_to_return() {
+    use rustclipsync_core::worker::{Event, Worker};
+    use std::{sync::mpsc, time::Duration};
+    let (responses_tx, responses_rx) = mpsc::channel();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (events_tx, events_rx) = mpsc::sync_channel(1);
+    events_tx.send((7, Event::Changed)).unwrap();
+    let remote = Arc::new(ControlledPoll {
+        responses: Mutex::new(responses_rx),
+        entered: entered_tx,
+    });
+    let worker = Worker::start(remote, identity(), 7, events_tx);
+    let deadline = Duration::from_secs(6);
+    entered_rx.recv_timeout(deadline).unwrap();
+    worker.shutdown();
+    responses_tx.send(Err(Error::Status(401))).unwrap();
+    worker
+        .join()
+        .expect("worker must stop even with a full event queue");
+    assert_eq!(entered_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    assert_eq!(events_rx.try_recv(), Ok((7, Event::Changed)));
+    assert_eq!(events_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+}
+
+#[test]
+fn join_reports_transport_panic_to_the_host() {
+    use rustclipsync_core::worker::Worker;
+    use std::{sync::mpsc, time::Duration};
+    let (responses_tx, responses_rx) = mpsc::channel();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (events_tx, _events_rx) = mpsc::sync_channel(1);
+    let remote = Arc::new(ControlledPoll {
+        responses: Mutex::new(responses_rx),
+        entered: entered_tx,
+    });
+    let worker = Worker::start(remote, identity(), 7, events_tx);
+    entered_rx.recv_timeout(Duration::from_secs(6)).unwrap();
+    // The controlled transport panics on an unexpected response-channel close.
+    drop(responses_tx);
+    assert!(
+        worker.join().is_err(),
+        "transport panics must be observable by the host"
+    );
+}

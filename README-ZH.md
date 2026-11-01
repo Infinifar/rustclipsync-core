@@ -33,6 +33,8 @@ Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分�
 
 同步入口会在发送前，将重启恢复的待发内容与当前剪贴板核对。`flush` 对最新待发内容重新应用当前敏感策略和正则过滤规则。新的超大复制也会淘汰旧内容；结果未知的上传仍通过取消接口确认后才能丢弃。剪贴板写入返回错误时，会话先持久化 `skipped` 再返回错误，让后续接收继续运行且不重放结果不明的写入；如果恢复状态保存失败，则按状态保存错误处理并重建会话。
 
+`Error`、`SyncError` 和 `ClipboardError` 实现 `Display` 与 `std::error::Error`。显示文本不展开底层 URL 或适配器提供的详情，`source()` 保留可按类型检查的原始原因。`Worker::shutdown()` 只请求停止；`Worker::join()` 请求停止并等待退出，向宿主返回线程 panic，须在 UI 线程之外调用。直接丢弃 Worker 仍只请求停止而不等待。自定义 `Transport` 必须为每项操作（包括完整的长轮询请求）设置有限超时；停止请求不能中断正在执行的自定义调用。
+
 ## 协议和隐私约束
 
 - 对接 [RustClipSync 服务端](https://github.com/Infinifar/rustclipsync-server) 及其 [接口协议](https://github.com/Infinifar/rustclipsync-server/blob/main/PROTOCOL-V1.md)，没有加入旧 SyncClipboard HTTP/SignalR 传输实现。
