@@ -71,7 +71,9 @@ python3 tools/export_source.py ../omarchy-plugins-dev/io.github.infinifar.omacli
 
 The export manifest records the source version, original extraction commit and SHA-256 of each file. Do not edit consumer snapshots directly: change this repository, run tests, re-export, then update the consumer's Cargo.lock. A future library release can move consumers to a pinned version or Git commit instead of a floating branch.
 
-The Windows client is [RustClipSync Desktop](https://github.com/Infinifar/rustclipsync-desktop), whose local directory is named `rustclipsync-destop`. Android currently implements the same protocol in Kotlin without JNI.
+The Windows and Linux desktop client is [RustClipSync Desktop](https://github.com/Infinifar/rustclipsync-desktop), with WinUI 3 on Windows 11 and a standalone Qt 6/QML interface on Linux. Linux x86_64 packages target Debian 12, Ubuntu 24.04, Fedora 43 and Arch/Omarchy, without requiring Omarchy or Quickshell. See the [downloads](https://github.com/Infinifar/rustclipsync-desktop/releases) and [Linux guide](https://github.com/Infinifar/rustclipsync-desktop/blob/main/LINUX.md). X11 is supported; Wayland requires data-control support, and GNOME/Wayland sessions without it are currently unsupported.
+
+The [Omaclipsync plugin](https://github.com/Infinifar/omaclipsync) provides integration with the Omarchy shell. Both desktop clients and the plugin reuse this core through platform adapters. Android currently implements the same protocol in Kotlin without JNI.
 
 MIT license. The original implementation came from `Infinifar/omaclipsync`, extraction baseline commit `a8c330136886ad547dfadf386bb66901b3bbc45c`. New cross-platform interfaces, tests and export tools are maintained here.
 

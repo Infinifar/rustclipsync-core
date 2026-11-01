@@ -3,7 +3,7 @@
 [English](README.md) · 简体中文
 
 RustClipSync 客户端的共享 Rust 核心，从 Omaclipsync 0.2.0 的现有同步实现抽取。
-Linux 和 Windows 应复用这里的消息状态机与 HTTPS 协议，分别实现操作系统适配层。
+Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分别实现操作系统适配层。
 这是客户端库，不是服务端，也不是独立桌面应用。
 
 ## 已抽取的内容
@@ -23,7 +23,7 @@ Linux 和 Windows 应复用这里的消息状态机与 HTTPS 协议，分别实�
 
 ## 适配边界
 
-1. 用平台凭据库取得随机 32 字节密钥：Linux 使用 Secret Service，Windows 计划用 DPAPI CurrentUser 保护密钥。
+1. 用平台凭据库取得随机 32 字节密钥：Linux 使用 Secret Service，Windows 使用 DPAPI CurrentUser 保护密钥。
 2. 实现 `StateStore`：限长读取、仅当前用户可读、原子持久化替换，完整保存核心生成的字节。只有文件不存在才能返回 `None`；解密失败不得偷偷重建身份。
 3. 实现 `Clipboard`：返回文本及敏感标记；写入必须携带消息来源标记。`write` 成功表示系统剪贴板已接受内容，单独写入私有收件箱不能伪报 `applied`。
 4. 使用 `NoHistory` 或实现 `HistorySink`。核心不决定历史存储格式，也不自行记录剪贴板正文。
@@ -73,7 +73,9 @@ python3 tools/export_source.py ../omarchy-plugins-dev/io.github.infinifar.omacli
 
 导出清单包含来源版本、原始提取提交及各文件 SHA-256。不要直接编辑消费端快照；修改本仓库、运行测试、重新导出，再更新消费端 Cargo.lock。将来发布共享库后可统一切换到固定版本或 Git 提交，不依赖浮动主分支。
 
-Windows 方案在相邻的 `rustclipsync-destop` 项目中；Android 现阶段继续使用 Kotlin 实现同一协议，不强行加入 JNI。
+Windows 与 Linux 桌面客户端为 [RustClipSync Desktop](https://github.com/Infinifar/rustclipsync-desktop)：Windows 11 使用 WinUI 3，Linux 使用独立的 Qt 6/QML 界面。Linux 提供面向 Debian 12、Ubuntu 24.04、Fedora 43 和 Arch/Omarchy 的 x86_64 安装包，无需 Omarchy 或 Quickshell。下载见 [Release 页面](https://github.com/Infinifar/rustclipsync-desktop/releases)，安装及桌面要求见 [Linux 使用说明](https://github.com/Infinifar/rustclipsync-desktop/blob/main/LINUX.md)。支持 X11；Wayland 需要 data-control 支持，缺少该协议的 GNOME/Wayland 会话暂不支持。
+
+[Omaclipsync 插件](https://github.com/Infinifar/omaclipsync) 提供 Omarchy shell 集成。桌面客户端与插件均通过平台适配层复用本核心；Android 现阶段继续使用 Kotlin 实现同一协议，不强行加入 JNI。
 
 MIT 许可，原始实现来源：`Infinifar/omaclipsync`，提取基线提交 `a8c330136886ad547dfadf386bb66901b3bbc45c`。新增的跨平台接口、测试和导出工具在本项目维护。
 
