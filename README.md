@@ -100,3 +100,8 @@ Ordinary messages remain unconsumed for foreground `pull`; the server still only
 retains its latest value. Pairing and restored outbox checks must finish in the
 foreground first. Pending uploads are left for foreground resolution. Hosts own
 scheduling and platform lifetime limits; this API does not grant background runtime.
+
+`Session::pull_background(observed, true)` additionally permits clipboard writes
+without reading the clipboard, subject to the existing sensitive policy. Platforms
+must require a separate explicit opt-in: without a readable snapshot, another
+app's recently copied value may be overwritten. Pending uploads remain deferred.

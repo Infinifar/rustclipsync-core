@@ -885,3 +885,27 @@ fn background_inbox_aborts_when_lifecycle_changes_during_download() {
     assert!(s.persisted.inbox.is_none());
     assert_eq!(s.persisted.state.cursor, 0);
 }
+
+#[test]
+fn background_write_opt_in_never_reads_and_preserves_sensitive_policy() {
+    for (allow_sensitive, inbox, expected, writes) in [
+        (false, false, Outcome::Filtered, 0),
+        (true, true, Outcome::Stored, 0),
+        (true, false, Outcome::Downloaded, 1),
+    ] {
+        let f = Fixture::new();
+        let mut s = f.open_sensitive(allow_sensitive);
+        s.use_sensitive_inbox(inbox);
+        s.check().unwrap();
+        let reads = f.clipboard.snapshots.get();
+        f.clipboard.fail_on_snapshot.set(Some(reads + 1));
+        f.remote.publish("synthetic marked background value", true);
+        assert_eq!(s.pull_background(0, true).unwrap(), expected);
+        assert_eq!(f.clipboard.writes.get(), writes);
+        f.remote
+            .publish("synthetic ordinary background value", false);
+        assert_eq!(s.pull_background(0, true).unwrap(), Outcome::Downloaded);
+        assert_eq!(f.clipboard.writes.get(), writes + 1);
+        assert_eq!(f.clipboard.snapshots.get(), reads);
+    }
+}

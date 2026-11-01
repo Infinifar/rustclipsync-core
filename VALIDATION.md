@@ -62,8 +62,8 @@
 ## 2026-11-01: background inbox API
 
 Added clipboard-free `pull_inbox` using the same receive validation and RCS1 commit
-path as foreground `pull`. Local `cargo test --locked` passed 48 tests, including
-three background regressions (no clipboard access, ordinary receive deferred,
-foreground restore/opt-in guards, and lifecycle invalidation). `cargo fmt --all
+path as foreground `pull`. Local `cargo test --locked` passed 49 tests, including
+four background regressions (no clipboard access, ordinary receive deferred,
+foreground restore/opt-in guards, lifecycle invalidation, and explicit background writes under all three sensitive policies). `cargo fmt --all
 -- --check` and Clippy all-targets with warnings denied passed. No platform or
 physical-device validation is implied by these synthetic Rust tests.
