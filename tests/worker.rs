@@ -6,6 +6,13 @@ use rustclipsync_core::{
 };
 use std::sync::{Arc, Mutex};
 
+#[test]
+fn worker_preserves_thread_and_unwind_auto_traits() {
+    fn assert_traits<T: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+    assert_traits::<rustclipsync_core::worker::Worker>();
+    assert_traits::<&rustclipsync_core::worker::Worker>();
+}
+
 fn identity() -> Persisted {
     Persisted {
         server: "https://example.test".into(),
