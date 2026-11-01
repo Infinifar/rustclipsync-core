@@ -470,10 +470,46 @@ impl<C: Clipboard, S: StateStore, H: HistorySink, R: Transport> Session<C, S, H,
         if self.persisted.state.pending.is_some() || self.persisted.state.applying.is_some() {
             return Ok(Outcome::Skipped);
         }
-        let before = self
-            .clipboard
-            .snapshot(self.allow_sensitive)
-            .map_err(SyncError::Clipboard)?;
+        self.pull_target(observed, false)
+    }
+
+    /// Receive only marked sensitive content into the enabled encrypted inbox.
+    ///
+    /// This never reads or writes the platform clipboard. An ordinary message is
+    /// left unconsumed for a foreground receive (the server still retains only
+    /// its latest message). Registration and restored outbox validation must
+    /// first complete in the foreground via [`Self::check`]. Disabled inboxes,
+    /// unchecked restored state and pending uploads return [`Outcome::Skipped`].
+    ///
+    /// # Errors
+    /// Returns transport, epoch, validation or durable storage errors, exactly
+    /// as [`Self::pull`]. Stored messages retain the existing skipped ack rules.
+    pub fn pull_inbox(&mut self, observed: u64) -> Result<Outcome, SyncError> {
+        if !self.sensitive_inbox || !self.persisted.paired || self.needs_pending_check {
+            return Ok(Outcome::Skipped);
+        }
+        if self.persisted.state.pending.is_some() || self.persisted.state.applying.is_some() {
+            return Ok(Outcome::Skipped);
+        }
+        // There is no outbox here: flush only the durable acknowledgement,
+        // including one whose previous response was lost. Never retry an upload
+        // while the platform clipboard is unavailable in the background.
+        self.flush(observed)?;
+        let result = self.pull_target(observed, true)?;
+        if result == Outcome::Stored {
+            self.flush(observed)?;
+        }
+        Ok(result)
+    }
+
+    fn pull_target(&mut self, observed: u64, inbox_only: bool) -> Result<Outcome, SyncError> {
+        let before = if inbox_only {
+            None
+        } else {
+            self.clipboard
+                .snapshot(self.allow_sensitive)
+                .map_err(SyncError::Clipboard)?
+        };
         let remote = self.remote.state(&self.persisted)?;
         if remote.epoch != self.persisted.state.epoch
             || remote.revision < self.persisted.state.cursor
@@ -496,6 +532,9 @@ impl<C: Clipboard, S: StateStore, H: HistorySink, R: Transport> Session<C, S, H,
                 .acknowledge_self(message)
                 .map_err(invalid_state)?;
             self.save()?;
+            return Ok(Outcome::Skipped);
+        }
+        if inbox_only && !message.sensitive {
             return Ok(Outcome::Skipped);
         }
         if message.sensitive && !self.allow_sensitive {
@@ -531,11 +570,12 @@ impl<C: Clipboard, S: StateStore, H: HistorySink, R: Transport> Session<C, S, H,
             return Ok(Outcome::Skipped);
         }
         if self.generation.load(Ordering::SeqCst) != observed
-            || self
-                .clipboard
-                .snapshot(self.allow_sensitive)
-                .map_err(SyncError::Clipboard)?
-                != before
+            || (!inbox_only
+                && self
+                    .clipboard
+                    .snapshot(self.allow_sensitive)
+                    .map_err(SyncError::Clipboard)?
+                    != before)
         {
             return Ok(Outcome::Skipped);
         }

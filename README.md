@@ -90,3 +90,13 @@ MIT license. The original implementation came from `Infinifar/omaclipsync`, extr
 Clients can call `Session::use_sensitive_inbox(true)`. With sensitive synchronization enabled, incoming sensitive text and the receive cursor are stored in one encrypted state commit and acknowledged as `skipped`, without claiming a system clipboard write. Only the latest item is retained; `clear_inbox(id)` does not reset the cursor. Default receive behavior is unchanged. `HistorySink::record_marked` lets platforms exclude sensitive text from ordinary history; notification identity does not contain inbox text.
 
 The new `Persisted.inbox` field defaults to empty when reading older encrypted files. The state limit is now 64 MiB to accommodate worst-case pending, replacement and private inbox items. This Rust API change was released as crate 0.2.0 without changing the server HTTP protocol.
+
+### Clipboard-free background inbox receive
+
+`Session::pull_inbox(observed)` receives marked sensitive messages only when the
+private encrypted inbox is enabled. It reuses `pull` validation and persistence,
+never accesses the clipboard, and acknowledges durable inbox storage as `skipped`.
+Ordinary messages remain unconsumed for foreground `pull`; the server still only
+retains its latest value. Pairing and restored outbox checks must finish in the
+foreground first. Pending uploads are left for foreground resolution. Hosts own
+scheduling and platform lifetime limits; this API does not grant background runtime.

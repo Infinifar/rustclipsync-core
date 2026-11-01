@@ -58,3 +58,12 @@
 - 当前 45 项 Rust 测试、严格 Clippy 和 rustdoc 通过。
 - 使用临时数据库、回环 HTTPS 代理和内存剪贴板运行 `tests/server_e2e.py`，与更新后的服务端 2.0.0 互通通过：注册、最新值同步、幂等、清空/重启、回环、敏感策略和冲突。未连接用户服务器或读取实际剪贴板。
 - 桌面端和插件由同一份共享核心自动导出快照；安卓本轮仅同步接口地址，保留 Kotlin 实现。
+
+## 2026-11-01: background inbox API
+
+Added clipboard-free `pull_inbox` using the same receive validation and RCS1 commit
+path as foreground `pull`. Local `cargo test --locked` passed 48 tests, including
+three background regressions (no clipboard access, ordinary receive deferred,
+foreground restore/opt-in guards, and lifecycle invalidation). `cargo fmt --all
+-- --check` and Clippy all-targets with warnings denied passed. No platform or
+physical-device validation is implied by these synthetic Rust tests.

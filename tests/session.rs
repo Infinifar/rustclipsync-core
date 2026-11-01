@@ -807,3 +807,81 @@ fn restored_stale_pending_does_not_block_direct_pull() {
     assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Downloaded);
     assert!(f.remote.data.lock().unwrap().sends.is_empty());
 }
+
+#[test]
+fn background_inbox_never_uses_clipboard_and_preserves_ordinary_receive() {
+    let f = Fixture::new();
+    let mut s = f.open_sensitive(true);
+    s.use_sensitive_inbox(true);
+    s.check().unwrap();
+    let reads = f.clipboard.snapshots.get();
+    f.clipboard.fail_on_snapshot.set(Some(reads + 1));
+    f.clipboard.fail.set(true);
+    f.remote.publish("synthetic background secret", true);
+    assert_eq!(s.pull_inbox(0).unwrap(), Outcome::Stored);
+    assert_eq!(f.clipboard.snapshots.get(), reads);
+    assert_eq!(f.clipboard.writes.get(), 0);
+    assert_eq!(
+        s.persisted.inbox.as_ref().unwrap().text,
+        "synthetic background secret"
+    );
+    s.flush(0).unwrap();
+    assert_eq!(
+        f.remote.data.lock().unwrap().acknowledgements[0].result,
+        "skipped"
+    );
+    assert!(!f
+        .store
+        .bytes
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .windows(b"synthetic background secret".len())
+        .any(|bytes| bytes == b"synthetic background secret"));
+    let cursor = s.persisted.state.cursor;
+    f.remote.publish("ordinary foreground value", false);
+    assert_eq!(s.pull_inbox(0).unwrap(), Outcome::Skipped);
+    assert_eq!(s.persisted.state.cursor, cursor);
+    assert_eq!(f.clipboard.snapshots.get(), reads);
+    f.clipboard.fail_on_snapshot.set(None);
+    f.clipboard.fail.set(false);
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Downloaded);
+}
+
+#[test]
+fn background_inbox_requires_opt_in_and_foreground_restore_check() {
+    let f = Fixture::new();
+    let mut s = f.open_sensitive(true);
+    s.use_sensitive_inbox(true);
+    assert_eq!(s.pull_inbox(0).unwrap(), Outcome::Skipped);
+    assert_eq!(f.remote.data.lock().unwrap().calls, 0);
+    s.check().unwrap();
+    f.remote.publish("private fixture", true);
+    s.use_sensitive_inbox(false);
+    assert_eq!(s.pull_inbox(0).unwrap(), Outcome::Skipped);
+    assert_eq!(s.persisted.state.cursor, 0);
+    s.use_sensitive_inbox(true);
+    f.copy(&mut s, "pending fixture");
+    drop(s);
+    let reads = f.clipboard.snapshots.get();
+    let mut restored = f.open_sensitive(true);
+    restored.use_sensitive_inbox(true);
+    assert_eq!(restored.pull_inbox(0).unwrap(), Outcome::Skipped);
+    assert_eq!(f.clipboard.snapshots.get(), reads);
+    assert!(restored.persisted.state.pending.is_some());
+}
+
+#[test]
+fn background_inbox_aborts_when_lifecycle_changes_during_download() {
+    let f = Fixture::new();
+    let mut s = f.open_sensitive(true);
+    s.use_sensitive_inbox(true);
+    s.check().unwrap();
+    f.remote.publish("synthetic revoked preview", true);
+    f.remote
+        .change_during_download
+        .store(true, Ordering::SeqCst);
+    assert_eq!(s.pull_inbox(0).unwrap(), Outcome::Skipped);
+    assert!(s.persisted.inbox.is_none());
+    assert_eq!(s.persisted.state.cursor, 0);
+}
