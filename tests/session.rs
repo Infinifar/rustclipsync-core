@@ -90,6 +90,9 @@ struct Remote {
     fail_report: AtomicBool,
     fail_revoke: AtomicBool,
     hide_delivery: AtomicBool,
+    fail_cancel: AtomicBool,
+    fail_state: AtomicBool,
+    cancellations: AtomicU64,
 }
 impl Remote {
     fn new(generation: Arc<AtomicU64>) -> Self {
@@ -111,6 +114,9 @@ impl Remote {
             fail_report: AtomicBool::new(false),
             fail_revoke: AtomicBool::new(false),
             hide_delivery: AtomicBool::new(false),
+            fail_cancel: AtomicBool::new(false),
+            fail_state: AtomicBool::new(false),
+            cancellations: AtomicU64::new(0),
         }
     }
     fn publish(&self, text: &str, sensitive: bool) {
@@ -169,6 +175,9 @@ impl Transport for Remote {
         })
     }
     fn state(&self, _: &Persisted) -> Result<RemoteState, Error> {
+        if self.fail_state.load(Ordering::SeqCst) {
+            return Err(Error::Status(503));
+        }
         self.control_log.lock().unwrap().push("state");
         let mut d = self.data.lock().unwrap();
         d.calls += 1;
@@ -248,6 +257,10 @@ impl Transport for Remote {
         Ok(revision)
     }
     fn cancel(&self, _: &Persisted, o: &Outbox) -> Result<Option<u64>, Error> {
+        self.cancellations.fetch_add(1, Ordering::SeqCst);
+        if self.fail_cancel.load(Ordering::SeqCst) {
+            return Err(Error::Status(503));
+        }
         Ok(self.data.lock().unwrap().commits.get(&o.copy.id).copied())
     }
     fn acknowledge(&self, _: &Persisted, ack: &Ack) -> Result<(), Error> {
@@ -382,6 +395,113 @@ fn conflict_does_not_silently_rebase_or_replace_clipboard() {
     f.remote.publish("remote", false);
     assert!(matches!(s.flush(0), Err(SyncError::Conflict)));
     assert_eq!(s.persisted.state.pending.unwrap().base_revision, 0);
+    assert_eq!(f.clipboard.writes.get(), 0);
+}
+
+#[test]
+fn opted_in_conflict_recovery_skips_both_old_values_and_allows_a_fresh_copy() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "local conflicting value");
+    f.remote.publish("remote concurrent value", false);
+    assert!(matches!(s.flush(0), Err(SyncError::Conflict)));
+    f.copy(&mut s, "queued before conflict was resolved");
+    let before = f.clipboard.value.borrow().clone();
+    assert_eq!(s.recover_upload_conflict(0).unwrap(), Outcome::Skipped);
+    assert!(!s.has_pending());
+    assert_eq!(*f.clipboard.value.borrow(), before);
+    assert_eq!(f.clipboard.writes.get(), 0);
+    assert_eq!(f.remote.data.lock().unwrap().revision, 1);
+    assert_eq!(f.remote.data.lock().unwrap().sends.len(), 1);
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Current);
+    drop(s);
+    let mut s = f.open();
+    s.check().unwrap();
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Current);
+    f.copy(&mut s, "a genuinely new user copy");
+    assert_eq!(s.flush(0).unwrap(), Outcome::Uploaded);
+    assert_eq!(f.remote.data.lock().unwrap().revision, 2);
+}
+
+#[test]
+fn opted_in_conflict_recovery_recognizes_an_already_committed_upload() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "local committed value");
+    f.remote.lose_response.store(true, Ordering::SeqCst);
+    assert!(s.flush(0).is_err());
+    f.remote.publish("remote newer value", false);
+    let before = f.clipboard.value.borrow().clone();
+    assert_eq!(s.recover_upload_conflict(0).unwrap(), Outcome::Skipped);
+    assert_eq!(s.persisted.state.cursor, 2);
+    assert!(!s.has_pending());
+    assert_eq!(*f.clipboard.value.borrow(), before);
+    assert_eq!(f.clipboard.writes.get(), 0);
+    assert_eq!(f.remote.data.lock().unwrap().sends.len(), 1);
+}
+
+#[test]
+fn conflict_recovery_survives_restart_before_or_after_cancellation() {
+    for fail_cancel in [true, false] {
+        let f = Fixture::new();
+        let mut s = f.open();
+        s.check().unwrap();
+        f.copy(&mut s, "conflicting copy");
+        f.remote.publish("remote value to skip", false);
+        assert!(matches!(s.flush(0), Err(SyncError::Conflict)));
+        f.remote.fail_cancel.store(fail_cancel, Ordering::SeqCst);
+        f.remote.fail_state.store(!fail_cancel, Ordering::SeqCst);
+        assert!(s.recover_upload_conflict(0).is_err());
+        assert!(s.persisted.state.resolving_conflict);
+        assert!(s.has_pending());
+        let saved = state::open(&f.key, f.store.load().unwrap().unwrap()).unwrap();
+        assert!(
+            saved.state.resolving_conflict,
+            "recovery intent must survive cancellation uncertainty"
+        );
+        f.copy(&mut s, "copied during unresolved recovery");
+        assert!(s.persisted.state.queued.is_none());
+        drop(s);
+        f.remote.fail_cancel.store(false, Ordering::SeqCst);
+        f.remote.fail_state.store(false, Ordering::SeqCst);
+        // Recovery must not need access to a foreground clipboard after reopen.
+        f.clipboard.fail.set(true);
+        let mut s = f.open();
+        assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Skipped);
+        assert_eq!(s.flush(0).unwrap(), Outcome::Skipped);
+        assert!(!s.has_pending());
+        assert!(!s.persisted.state.resolving_conflict);
+        assert_eq!(s.persisted.state.cursor, 1);
+        assert_eq!(f.clipboard.writes.get(), 0);
+        assert_eq!(f.remote.data.lock().unwrap().sends.len(), 1);
+    }
+}
+
+#[test]
+fn conflict_recovery_requires_durable_intent_and_rejects_epoch_changes() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "local");
+    f.remote.publish("remote", false);
+    assert!(matches!(s.flush(0), Err(SyncError::Conflict)));
+    f.store.fail.set(true);
+    assert!(matches!(
+        s.recover_upload_conflict(0),
+        Err(SyncError::Storage(_))
+    ));
+    assert_eq!(f.remote.cancellations.load(Ordering::SeqCst), 0);
+    f.store.fail.set(false);
+    let original_epoch = s.persisted.state.epoch.clone();
+    f.remote.data.lock().unwrap().epoch = state::random_uuid().unwrap();
+    assert!(matches!(
+        s.recover_upload_conflict(0),
+        Err(SyncError::Epoch)
+    ));
+    assert_eq!(s.persisted.state.epoch, original_epoch);
+    assert!(s.persisted.state.resolving_conflict);
     assert_eq!(f.clipboard.writes.get(), 0);
 }
 
