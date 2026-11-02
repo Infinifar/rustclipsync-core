@@ -41,6 +41,7 @@ Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分�
 
 ## 协议和隐私约束
 
+- 当前剪贴板仍带敏感标记时，关闭敏感同步不会阻塞普通文本接收。接收阶段的快照检查将策略拒绝视为没有可用文本，不读取被禁止的正文；真实剪贴板 I/O 故障仍会中止操作。关闭敏感同步后，远端标记文本仍被过滤。
 - 对接 [RustClipSync 服务端](https://github.com/Infinifar/rustclipsync-server) 及其 [接口协议](https://github.com/Infinifar/rustclipsync-server/blob/main/PROTOCOL.md)，没有加入旧 SyncClipboard HTTP/SignalR 传输实现。
 - UUID 标识一次复制事件；重试保留 UUID。revision 排序，epoch 隔离服务端重置；客户端时间仅用于重试有效期，不能用来排序或生成唯一性保证。
 - 自动上传不静默覆盖冲突；离线只同步最新值。发送结果未知时保留原请求，先确认/取消后才处理新的最后一条。

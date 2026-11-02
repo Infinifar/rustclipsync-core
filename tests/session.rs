@@ -445,6 +445,67 @@ fn local_event_during_download_prevents_overwrite() {
 }
 
 #[test]
+fn disabling_sensitive_policy_keeps_normal_receives_working() {
+    for direction in [SyncDirection::Bidirectional, SyncDirection::ReceiveOnly] {
+        for reopen in [false, true] {
+            let f = Fixture::new();
+            let mut s = f.open_sensitive(true);
+            s.set_sync_direction(direction, false).unwrap();
+            s.check().unwrap();
+            f.remote.publish("marked fixture", true);
+            assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Downloaded);
+            assert!(f.clipboard.value.borrow().as_ref().unwrap().1);
+
+            if reopen {
+                s = f.open_sensitive(false);
+                s.set_sync_direction(direction, false).unwrap();
+            } else {
+                s.update_policy(Filter::new(FilterMode::Off, &[], false).unwrap(), false);
+            }
+            s.check().unwrap();
+            assert_eq!(
+                s.pull(0, Instant::now()).unwrap(),
+                Outcome::Current,
+                "disabled marked snapshot must not become a clipboard failure: {direction:?}, reopen={reopen}"
+            );
+            f.remote.publish("ordinary fixture", false);
+            assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Downloaded);
+            assert_eq!(
+                *f.clipboard.value.borrow(),
+                Some(("ordinary fixture".into(), false))
+            );
+            f.remote.publish("blocked marked fixture", true);
+            assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Filtered);
+            assert_eq!(f.clipboard.writes.get(), 2);
+            assert!(f.remote.data.lock().unwrap().sends.is_empty());
+            assert!(s.persisted.inbox.is_none());
+        }
+    }
+}
+
+#[test]
+fn sensitive_snapshot_normalization_preserves_real_clipboard_failures() {
+    for failed_read in [1, 2, 3] {
+        let f = Fixture::new();
+        let mut s = f.open();
+        s.check().unwrap();
+        *f.clipboard.value.borrow_mut() = Some(("marked local fixture".into(), true));
+        f.remote.publish("ordinary remote fixture", false);
+        f.clipboard.fail_on_snapshot.set(Some(failed_read));
+        assert!(matches!(
+            s.pull(0, Instant::now()),
+            Err(SyncError::Clipboard(ClipboardError::Unavailable))
+        ));
+        assert_eq!(f.clipboard.writes.get(), 0, "failed read {failed_read}");
+        assert!(s.persisted.state.applying.is_none());
+        f.clipboard.fail_on_snapshot.set(None);
+        assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Downloaded);
+        assert_eq!(f.clipboard.writes.get(), 1);
+        assert!(f.remote.data.lock().unwrap().sends.is_empty());
+    }
+}
+
+#[test]
 fn sensitive_content_is_filtered_in_both_directions_by_default() {
     let f = Fixture::new();
     let mut s = f.open();
