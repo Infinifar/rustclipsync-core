@@ -506,6 +506,29 @@ fn conflict_recovery_requires_durable_intent_and_rejects_epoch_changes() {
 }
 
 #[test]
+fn legacy_conflict_is_detected_after_reopen_even_when_clipboard_changed() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "stale pending");
+    f.remote.publish("newer remote", false);
+    assert!(matches!(s.flush(0), Err(SyncError::Conflict)));
+    assert!(!s.persisted.state.resolving_conflict);
+    drop(s);
+    *f.clipboard.value.borrow_mut() = Some(("later local value".into(), false));
+    let mut s = f.open();
+    s.check().unwrap();
+    assert!(s.has_observed_upload_conflict(), "a restored legacy outbox must be recovered before a normal cancel-and-pull can overwrite the clipboard");
+    assert_eq!(s.recover_upload_conflict(0).unwrap(), Outcome::Skipped);
+    assert_eq!(
+        *f.clipboard.value.borrow(),
+        Some(("later local value".into(), false))
+    );
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Current);
+    assert_eq!(f.clipboard.writes.get(), 0);
+}
+
+#[test]
 fn received_message_is_not_reuploaded_or_replayed_after_clear_and_restart() {
     let f = Fixture::new();
     let mut s = f.open();
