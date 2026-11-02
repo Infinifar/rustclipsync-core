@@ -6,6 +6,13 @@ RustClipSync 客户端的共享 Rust 核心，从 Omaclipsync 0.2.0 的现有同
 Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分别实现操作系统适配层。
 这是客户端库，不是服务端，也不是独立桌面应用。
 
+## 0.4.0 正式发布
+
+[发布说明](releases/v0.4.0.md) · [GitHub Release](https://github.com/Infinifar/rustclipsync-core/releases/tag/v0.4.0)
+
+配套版本：服务端 **3.0.0**、共享 core **0.4.0**、Windows/Linux 桌面端 **0.5.0**、Omaclipsync **0.4.0**，均使用协议 **3**。
+移动端与 Fcitx 输入法单独发布；切换共享服务端前请确认所用构建支持协议 3，否则继续使用服务端 2.0.0。本次不合并或发布这些客户端项目。
+
 ## 当前接口
 
 全部网络操作使用 `/api/...`，并要求协议 **3**。这是一次明确的不兼容升级，服务端与客户端须配套更新；旧客户端继续使用旧版服务端。设备凭据与加密状态格式保持不变。Rust 桌面端和 Omaclipsync 消费本仓库的导出快照，接口逻辑只在本仓库修改并重新导出。
