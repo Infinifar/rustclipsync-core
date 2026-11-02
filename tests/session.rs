@@ -1,6 +1,7 @@
 use rustclipsync_core::{
     adapters::{Clipboard, ClipboardError, NoHistory, StateStore},
     client::{Registration, RemoteState},
+    direction::SyncDirection,
     session::{Session, SessionConfig, SyncError},
     state::{self, Ack, Message, Outbox, Persisted},
     transport::Transport,
@@ -85,6 +86,10 @@ struct Remote {
     lose_response: AtomicBool,
     change_during_download: AtomicBool,
     generation: Arc<AtomicU64>,
+    control_log: Mutex<Vec<&'static str>>,
+    fail_report: AtomicBool,
+    fail_revoke: AtomicBool,
+    hide_delivery: AtomicBool,
 }
 impl Remote {
     fn new(generation: Arc<AtomicU64>) -> Self {
@@ -102,6 +107,10 @@ impl Remote {
             lose_response: AtomicBool::new(false),
             change_during_download: AtomicBool::new(false),
             generation,
+            control_log: Mutex::new(Vec::new()),
+            fail_report: AtomicBool::new(false),
+            fail_revoke: AtomicBool::new(false),
+            hide_delivery: AtomicBool::new(false),
         }
     }
     fn publish(&self, text: &str, sensitive: bool) {
@@ -119,6 +128,36 @@ impl Remote {
     }
 }
 impl Transport for Remote {
+    fn set_sync_direction(&self, s: &Persisted, _: SyncDirection, _: bool) -> Result<(), Error> {
+        self.control_log
+            .lock()
+            .unwrap()
+            .push(if s.paired { "update" } else { "configure" });
+        if s.paired && self.fail_report.load(Ordering::SeqCst) {
+            Err(Error::Status(503))
+        } else {
+            Ok(())
+        }
+    }
+    fn ensure_sync_direction(&self, _: &Persisted) -> Result<(), Error> {
+        self.control_log.lock().unwrap().push("ack");
+        if self.fail_report.load(Ordering::SeqCst) {
+            Err(Error::Status(503))
+        } else {
+            Ok(())
+        }
+    }
+    fn revoke_sync_direction(&self, s: &Persisted) -> Result<(), Error> {
+        if !s.paired {
+            return Ok(());
+        }
+        self.control_log.lock().unwrap().push("revoke");
+        if self.fail_revoke.load(Ordering::SeqCst) {
+            Err(Error::Status(503))
+        } else {
+            Ok(())
+        }
+    }
     fn register(&self, _: &Persisted) -> Result<Registration, Error> {
         let mut d = self.data.lock().unwrap();
         d.calls += 1;
@@ -130,16 +169,38 @@ impl Transport for Remote {
         })
     }
     fn state(&self, _: &Persisted) -> Result<RemoteState, Error> {
+        self.control_log.lock().unwrap().push("state");
         let mut d = self.data.lock().unwrap();
         d.calls += 1;
         Ok(RemoteState {
             epoch: d.epoch.clone(),
             revision: d.revision,
             ack_revision: d.ack,
-            message_id: d.current.as_ref().map(|v| v.0.id.clone()),
-            source_device_id: d.current.as_ref().map(|v| v.0.source_device_id.clone()),
-            size: d.current.as_ref().map(|v| v.1.len() as u64),
-            sensitive: d.current.as_ref().map(|v| v.0.sensitive),
+            delivery_revision: d
+                .current
+                .as_ref()
+                .filter(|_| !self.hide_delivery.load(Ordering::SeqCst))
+                .map(|v| v.0.revision),
+            message_id: d
+                .current
+                .as_ref()
+                .filter(|_| !self.hide_delivery.load(Ordering::SeqCst))
+                .map(|v| v.0.id.clone()),
+            source_device_id: d
+                .current
+                .as_ref()
+                .filter(|_| !self.hide_delivery.load(Ordering::SeqCst))
+                .map(|v| v.0.source_device_id.clone()),
+            size: d
+                .current
+                .as_ref()
+                .filter(|_| !self.hide_delivery.load(Ordering::SeqCst))
+                .map(|v| v.1.len() as u64),
+            sensitive: d
+                .current
+                .as_ref()
+                .filter(|_| !self.hide_delivery.load(Ordering::SeqCst))
+                .map(|v| v.0.sensitive),
         })
     }
     fn changes(&self, _: &Persisted) -> Result<Option<RemoteState>, Error> {
@@ -232,6 +293,11 @@ impl Fixture {
             NoHistory,
             self.generation.clone(),
         )
+        .map(|mut s| {
+            s.set_sync_direction(SyncDirection::Bidirectional, false)
+                .unwrap();
+            s
+        })
         .unwrap()
     }
     fn copy(&self, session: &mut TestSession, text: &str) {
@@ -908,4 +974,152 @@ fn background_write_opt_in_never_reads_and_preserves_sensitive_policy() {
         assert_eq!(f.clipboard.writes.get(), writes + 1);
         assert_eq!(f.clipboard.snapshots.get(), reads);
     }
+}
+
+#[test]
+fn direction_must_be_acknowledged_before_metadata_and_unknown_fails_closed() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    f.remote.fail_report.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        s.check(),
+        Err(SyncError::Remote(Error::Status(503)))
+    ));
+    assert!(
+        !f.remote.control_log.lock().unwrap().contains(&"state"),
+        "no metadata before ACK"
+    );
+    f.remote.fail_report.store(false, Ordering::SeqCst);
+    s.check().unwrap();
+    let log = f.remote.control_log.lock().unwrap().clone();
+    assert!(log.iter().position(|v| *v == "ack") < log.iter().position(|v| *v == "state"));
+    s.revoke_sync_direction().unwrap();
+    assert!(matches!(
+        s.check(),
+        Err(SyncError::Remote(Error::DirectionRequired))
+    ));
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Paused);
+    assert_eq!(
+        s.record_local("never-send", None, false, Instant::now())
+            .unwrap(),
+        Outcome::Paused
+    );
+}
+
+#[test]
+fn paused_direction_reports_without_reading_metadata_or_clipboard() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.set_sync_direction(SyncDirection::Bidirectional, true)
+        .unwrap();
+    s.check().unwrap();
+    assert!(s.persisted.paired);
+    assert!(!f.remote.control_log.lock().unwrap().contains(&"state"));
+    assert_eq!(f.clipboard.snapshots.get(), 0);
+    assert_eq!(s.push_now(0).unwrap(), Outcome::Paused);
+    assert_eq!(s.pull_background(0, true).unwrap(), Outcome::Paused);
+}
+
+#[test]
+fn failed_direction_update_keeps_local_receive_and_upload_guards() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "queued-before-pause");
+    f.remote.fail_report.store(true, Ordering::SeqCst);
+    assert!(s
+        .set_sync_direction(SyncDirection::Bidirectional, true)
+        .is_err());
+    assert!(s.persisted.state.pending.is_none());
+    assert_eq!(s.push_now(0).unwrap(), Outcome::Paused);
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Paused);
+    assert!(f.remote.data.lock().unwrap().sends.is_empty());
+}
+
+#[test]
+fn receive_only_and_pause_resolve_uncertain_upload_by_cancel_only() {
+    for (direction, paused) in [
+        (SyncDirection::ReceiveOnly, false),
+        (SyncDirection::Bidirectional, true),
+    ] {
+        let f = Fixture::new();
+        let mut s = f.open();
+        s.check().unwrap();
+        f.copy(&mut s, "uncertain");
+        f.remote.lose_response.store(true, Ordering::SeqCst);
+        assert!(s.flush(0).is_err());
+        s.set_sync_direction(direction, paused).unwrap();
+        assert!(s.persisted.state.discard_pending);
+        s.flush(0).unwrap();
+        assert!(s.persisted.state.pending.is_none());
+        assert_eq!(
+            f.remote.data.lock().unwrap().sends.len(),
+            1,
+            "direction changes must never retry the body"
+        );
+    }
+}
+
+#[test]
+fn absent_delivery_observes_global_revision_without_rebasing_existing_copy() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.copy(&mut s, "older-local");
+    f.remote.publish("filtered-remote", false);
+    f.remote.hide_delivery.store(true, Ordering::SeqCst);
+    s.check().unwrap();
+    assert_eq!(s.persisted.state.cursor, 1);
+    assert_eq!(
+        s.persisted.state.pending.as_ref().unwrap().base_revision,
+        0,
+        "existing copies retain their conflict base"
+    );
+    f.copy(&mut s, "real-new-copy-after-observation");
+    assert_eq!(
+        s.persisted.state.pending.as_ref().unwrap().base_revision,
+        1,
+        "a new copy may use the already observed revision"
+    );
+    assert_eq!(s.flush(0).unwrap(), Outcome::Uploaded);
+}
+
+#[test]
+fn older_authorized_delivery_is_processed_before_advancing_to_global_revision() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    f.remote.publish("eligible-backfill", false);
+    f.remote.data.lock().unwrap().revision = 9;
+    assert_eq!(s.pull(0, Instant::now()).unwrap(), Outcome::Downloaded);
+    assert_eq!(
+        s.persisted.state.cursor, 1,
+        "global metadata must not skip a valid older candidate"
+    );
+    assert_eq!(
+        f.clipboard.value.borrow().as_ref().unwrap().0,
+        "eligible-backfill"
+    );
+}
+
+#[test]
+fn repair_does_not_destroy_identity_when_old_direction_revocation_is_unconfirmed() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    s.check().unwrap();
+    let old = s.persisted.clone();
+    f.remote.fail_revoke.store(true, Ordering::SeqCst);
+    assert!(s
+        .re_pair_with_direction(SyncDirection::ReceiveOnly, false)
+        .is_err());
+    assert_eq!(s.persisted, old);
+    f.remote.fail_revoke.store(false, Ordering::SeqCst);
+    s.re_pair_with_direction(SyncDirection::ReceiveOnly, true)
+        .unwrap();
+    assert_ne!(s.persisted.state.device_id, old.state.device_id);
+    assert_eq!(
+        s.record_local("not-uploaded", None, false, Instant::now())
+            .unwrap(),
+        Outcome::Paused
+    );
 }

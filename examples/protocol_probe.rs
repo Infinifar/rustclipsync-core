@@ -2,6 +2,7 @@
 use rustclipsync_core::{
     adapters::{Clipboard, ClipboardError, NoHistory, StateStore},
     client::Client,
+    direction::SyncDirection,
     session::{Session, SessionConfig, SyncError},
     state, Filter, FilterMode, Outcome,
 };
@@ -59,6 +60,11 @@ fn open(base: &str, store: Memory, selection: Selection, key: [u8; 32]) -> TestS
         NoHistory,
         Arc::new(AtomicU64::new(0)),
     )
+    .map(|mut s| {
+        s.set_sync_direction(SyncDirection::Bidirectional, false)
+            .unwrap();
+        s
+    })
     .unwrap()
 }
 fn copy(s: &mut TestSession, text: &str) {

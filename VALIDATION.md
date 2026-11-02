@@ -67,3 +67,26 @@ four background regressions (no clipboard access, ordinary receive deferred,
 foreground restore/opt-in guards, lifecycle invalidation, and explicit background writes under all three sensitive policies). `cargo fmt --all
 -- --check` and Clippy all-targets with warnings denied passed. No platform or
 physical-device validation is implied by these synthetic Rust tests.
+
+
+## Protocol 3 direction routing (development branch)
+
+The coordinated 0.4.0 core adds selected direction plus pause, report-before-data,
+explicit logout revocation, old-session fencing, HTTP fallback of the exact WSS
+operation, protocol response validation, and separate global/delivery revisions.
+The preceding mobile-background-inbox commits are preserved.
+
+Local validation runs on disposable in-memory state and loopback-only fixtures.
+`cargo test --locked --all-features` contains 61 tests. All 12 new regressions
+were observed failing under deliberate behavior-assertion inversion in a
+temporary source copy, with the working source unchanged. Format, strict Clippy
+and rustdoc are checked separately. No physical clipboard, installed client,
+keyring, production database, or deployed container is touched by these tests.
+
+`tests/server_e2e.py` runs the same protocol probe twice on separate encrypted
+server databases: first with actual WSS upgrades and **zero** HTTP direction PUTs,
+then with every WS upgrade explicitly rejected and HTTP direction fallback
+required. It checks registration, latest-only receive, stable retry IDs, restart
+without replay, sensitive filtering and conflict preservation under both modes.
+Windows native CI and physical Android/desktop integration remain platform
+checks; success of these protocol fixtures does not claim those validations.

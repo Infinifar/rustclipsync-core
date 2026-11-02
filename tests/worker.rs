@@ -1,5 +1,6 @@
 use rustclipsync_core::{
     client::{Registration, RemoteState},
+    direction::SyncDirection,
     state::{Ack, Message, Outbox, Persisted, State},
     transport::Transport,
     Error,
@@ -28,6 +29,15 @@ struct ControlledPoll {
     entered: std::sync::mpsc::Sender<()>,
 }
 impl Transport for ControlledPoll {
+    fn set_sync_direction(&self, _: &Persisted, _: SyncDirection, _: bool) -> Result<(), Error> {
+        Ok(())
+    }
+    fn ensure_sync_direction(&self, _: &Persisted) -> Result<(), Error> {
+        Ok(())
+    }
+    fn revoke_sync_direction(&self, _: &Persisted) -> Result<(), Error> {
+        Ok(())
+    }
     fn changes(&self, _: &Persisted) -> Result<Option<RemoteState>, Error> {
         self.entered.send(()).unwrap();
         self.responses.lock().unwrap().recv().unwrap()
@@ -225,4 +235,93 @@ fn join_reports_transport_panic_to_the_host() {
         worker.join().is_err(),
         "transport panics must be observable by the host"
     );
+}
+
+struct ObservedPoll {
+    entered: std::sync::mpsc::Sender<u64>,
+    responses: Mutex<std::sync::mpsc::Receiver<Option<RemoteState>>>,
+}
+impl Transport for ObservedPoll {
+    fn set_sync_direction(&self, _: &Persisted, _: SyncDirection, _: bool) -> Result<(), Error> {
+        Ok(())
+    }
+    fn ensure_sync_direction(&self, _: &Persisted) -> Result<(), Error> {
+        Ok(())
+    }
+    fn revoke_sync_direction(&self, _: &Persisted) -> Result<(), Error> {
+        Ok(())
+    }
+    fn changes(&self, s: &Persisted) -> Result<Option<RemoteState>, Error> {
+        self.entered.send(s.state.cursor).unwrap();
+        Ok(self.responses.lock().unwrap().recv().unwrap())
+    }
+    fn register(&self, _: &Persisted) -> Result<Registration, Error> {
+        unreachable!()
+    }
+    fn state(&self, _: &Persisted) -> Result<RemoteState, Error> {
+        unreachable!()
+    }
+    fn content(&self, _: &Persisted, _: &Message) -> Result<String, Error> {
+        unreachable!()
+    }
+    fn send(&self, _: &Persisted, _: &Outbox) -> Result<u64, Error> {
+        unreachable!()
+    }
+    fn cancel(&self, _: &Persisted, _: &Outbox) -> Result<Option<u64>, Error> {
+        unreachable!()
+    }
+    fn acknowledge(&self, _: &Persisted, _: &Ack) -> Result<(), Error> {
+        unreachable!()
+    }
+}
+#[test]
+fn worker_observes_global_revision_without_skipping_a_smaller_delivery_cursor() {
+    use rustclipsync_core::worker::Worker;
+    use std::{sync::mpsc, time::Duration};
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let (events_tx, events_rx) = mpsc::sync_channel(4);
+    let remote = Arc::new(ObservedPoll {
+        entered: entered_tx,
+        responses: Mutex::new(reply_rx),
+    });
+    let mut state = identity();
+    let worker = Worker::start(remote, state.clone(), 1, events_tx);
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(6)).unwrap(), 0);
+    reply_tx
+        .send(Some(RemoteState {
+            epoch: state.state.epoch.clone(),
+            revision: 10,
+            ack_revision: 0,
+            delivery_revision: Some(4),
+            message_id: Some("message".into()),
+            source_device_id: Some("source".into()),
+            size: Some(4),
+            sensitive: Some(false),
+        }))
+        .unwrap();
+    // The main session processed only the authorized delivery, not global rev 10.
+    while events_rx.recv_timeout(Duration::from_secs(6)).unwrap().1
+        != rustclipsync_core::worker::Event::Changed
+    {}
+    state.state.cursor = 4;
+    worker.update(&state);
+    assert_eq!(
+        entered_rx.recv_timeout(Duration::from_secs(6)).unwrap(),
+        10,
+        "polling must retain observed global revision"
+    );
+    assert_eq!(
+        state.state.cursor, 4,
+        "notification updates must not skip the durable receive cursor"
+    );
+    reply_tx.send(None).unwrap();
+    assert_eq!(
+        entered_rx.recv_timeout(Duration::from_secs(6)).unwrap(),
+        10,
+        "a late host update must not roll global observation back"
+    );
+    worker.shutdown();
+    reply_tx.send(None).unwrap();
+    worker.join().unwrap();
 }

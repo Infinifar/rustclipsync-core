@@ -8,7 +8,7 @@ Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分�
 
 ## 当前接口
 
-全部网络操作使用 `/api/...`。迁移接口地址时，服务端和各客户端需要配套更新；设备身份、游标与加密状态格式保持不变。Rust 桌面端和 Omaclipsync 消费本仓库的导出快照，接口逻辑只在本仓库修改并重新导出。
+全部网络操作使用 `/api/...`，并要求协议 **3**。这是一次明确的不兼容升级，服务端与客户端须配套更新；旧客户端继续使用旧版服务端。设备凭据与加密状态格式保持不变。Rust 桌面端和 Omaclipsync 消费本仓库的导出快照，接口逻辑只在本仓库修改并重新导出。
 
 ## 已抽取的内容
 
@@ -23,7 +23,7 @@ Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分�
 
 没有 Wayland、WinUI、Windows API、Secret Service、托盘或文件路径依赖。构造会话会加载或创建加密状态，但不联网、不读取或写入剪贴板。宿主在专用工作线程串行调用同步方法；不要从 UI 线程调用阻塞网络操作。
 
-当前库版本 `0.3.0` 表示共享 Rust API 的版本，与服务端及客户端的正式产品版本独立。HTTP 统一使用 `/api/` 前缀，不再提供协议版本选择。
+当前库版本 `0.4.0` 表示共享 Rust API 的版本，与服务端及客户端的正式产品版本独立。HTTP 统一使用 `/api/` 前缀，通过 `X-RCS-Protocol: 3` 协商最低协议版本。
 
 ## 适配边界
 
@@ -31,7 +31,7 @@ Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分�
 2. 实现 `StateStore`：限长读取、仅当前用户可读、原子持久化替换，完整保存核心生成的字节。只有文件不存在才能返回 `None`；解密失败不得偷偷重建身份。
 3. 实现 `Clipboard`：返回文本及敏感标记；写入必须携带消息来源标记。`write` 成功表示系统剪贴板已接受内容，单独写入私有收件箱不能伪报 `applied`。
 4. 使用 `NoHistory` 或实现 `HistorySink`。核心不决定历史存储格式，也不自行记录剪贴板正文。
-5. 使用 `SessionConfig` 和 `Session::open` 构造会话。监视器维护共享的本地事件计数；通过 `record_local` / `record_clear` 记录真实事件，通过 `flush` / `pull` 完成同步。
+5. 使用 `SessionConfig` 和 `Session::open` 构造会话，在 `check` 前调用 `set_sync_direction(SyncDirection::Bidirectional, false)` 或对应方向/暂停状态；默认未知方向禁止收发。监视器维护共享的本地事件计数；通过 `record_local` / `record_clear` 记录真实事件，通过 `flush` / `pull` 完成同步。
 
 状态保存错误必须暂停并重建会话，不能继续用可能领先磁盘的内存状态。首次启动不能把原有系统剪贴板误当作新复制事件。通知只是唤醒信号，`state` 返回的 epoch 和 revision 才是同步依据。
 
@@ -48,7 +48,72 @@ Linux 和 Windows 客户端复用这里的消息状态机与 HTTPS 协议，分�
 - 敏感内容由宿主传入标记，默认应关闭同步；正则和标记都无法识别全部敏感信息。
 - TLS 默认校验证书，拒绝明文 HTTP、URL 内嵌凭据和重定向。兼容现有的显式 `insecure` 选项只供受控测试/自签名环境使用。
 - 状态加密保护磁盘文件，不是端到端加密；服务端仍可读取同步正文。内存中的文本、密钥和配对密码目前不保证即时清零。
-- 单条文本最大 10 MiB；状态最大 64 MiB。长轮询线程退出最多需等待当前请求的 30 秒超时，宿主需避免反复创建重叠 worker。
+- 单条文本最大 10 MiB；状态最大 64 MiB。长轮询线程退出需要等待有限的方向协商和当前 HTTP 请求的 30 秒超时，宿主需避免反复创建重叠 worker。
+
+
+## 设备方向与协议 3
+
+`direction::SyncDirection` 提供 `PushOnly`、`ReceiveOnly`、`Bidirectional`，
+序列化为 `PUSH_ONLY`、`RECEIVE_ONLY`、`BIDIRECTIONAL`。暂停是独立布尔工作态，
+保留所选方向。未知、撤销、暂停均不接收；单向接收和暂停不能上传。
+上报失败仍保留客户端本地新方向与过滤，不能因失败重新启用旧设置。
+
+宿主在后台线程串行调用以下接口，切换前增加本地 generation 并停止旧通知 Worker：
+
+```rust,no_run
+use rustclipsync_core::direction::SyncDirection;
+// session.set_sync_direction(SyncDirection::Bidirectional, false)?;
+// session.check()?; // 登记 -> 方向 ACK -> 元数据
+// session.set_sync_direction(SyncDirection::ReceiveOnly, true)?; // 暂停
+// session.revoke_sync_direction()?; // 显式退出登录，失败必须显示“未确认”
+```
+
+普通进程退出、网络断开和 `Worker::shutdown()` 不撤销方向，保留离线补发资格。
+`re_pair_with_direction(direction, paused)` 先确认撤销旧会话再替换身份，撤销失败不删除
+原身份。切换到暂停或单向接收时，旧的结果未知上传只能调用取消/结果查询，不重传正文。
+
+HTTPS 客户端维护一个 `/api/ws` 持久控制连接，Bearer 和协议版本通过请求头传入，
+不放入 URL。消息为 `SyncDirectionUpdate`、`SyncDirectionRevoke`，确认使用
+`SyncDirectionAck`，错误使用 `SyncDirectionError`。帧最多 4096 字节，控制操作有
+10 秒 I/O 总截止时间。控制锁不覆盖 HTTP 长轮询。HTTP 轮询上限 30 秒，首次发现/控制及降级可额外耗时
+最多 40 秒，停止和 join 仍须在 UI 线程外执行。控制 socket 复用已认证 HTTPS 发现的
+peer 地址，避免额外无截止时间的系统 DNS 调用。WS 不可用或确认丢失时，以相同
+session/version/payload 通过 HTTP 重试，不盲目创建另一个会话；HTTP 也失败则保留未确认操作。
+
+HTTP 降级和版本查询：
+
+- `GET /api/devices/{deviceId}/sync-direction`：只读取当前版本，不激活方向、不刷新 TTL。
+- 同一路径 `PUT`：`{sessionId,version,direction,paused,connect}`；新 UUID 会话使用
+  `connect:true` 和 CAS=current+1，当前会话修改使用 `connect:false`。
+- 同一路径 `DELETE`：`{sessionId,version}`，用于退出撤销。服务端保留版本墓碑，
+  完全相同的操作可幂等重试，旧请求不能复活新会话。
+
+```json
+{"sessionId":"00000000-0000-4000-8000-000000000001","version":1,"direction":"BIDIRECTIONAL","paused":false,"connect":true}
+```
+
+全部同步响应须带 `X-RCS-Protocol: 3`。旧客户端被新服务端以 HTTP 426/
+`PROTOCOL_UNSUPPORTED` 拒绝；新 core 也拒绝缺少版本头的旧服务端。错误码还包括
+`UNAUTHENTICATED`、`DEVICE_MISMATCH`、`VERSION_STALE`、`SESSION_REVOKED`、
+`SESSION_OFFLINE`、`RATE_LIMITED`、`INVALID_DIRECTION`、`DIRECTION_FORBIDDEN`。
+被新会话取代的旧 Worker 停止，不自动重新声明会话恢复旧方向；由宿主显式连接/方向修改
+重新开始。`SESSION_OFFLINE` 只表示当前在线租约过期，core 以新 GET+CAS 重连，
+不盲重试旧数据请求；旧在途请求的错误不能重置或冻结新会话。普通数据请求带已确认的 `X-RCS-Sync-Session`，登记、方向控制及取消旧上传不需要。
+
+重连先上报最新方向并等待 ACK，再由服务端发送管理页面窗口内、满足条件的每设备最近一条。
+客户端不硬编码补发窗口，也不以全局当前消息绕过补发限制。窗口默认值、范围、零值及过期
+规则以[服务端配置说明](https://github.com/Infinifar/rustclipsync-server/blob/main/docs/DIRECTION-PROTOCOL.md)
+为准。方向 TTL 由服务端维护，上报/登录/活跃刷新；30 天未活跃撤销后须重新上报。
+
+`RemoteState.revision` 仍是全局上传冲突版本；可空 `deliveryRevision` 是该设备获准接收
+消息的版本。通知 Worker 独立保留单调的已观察全局版本，宿主较小的接收游标不能回退
+它，避免被过滤元数据引起热轮询。合法补发即使早于全局版本也先处理，不能先跳过游标。无可接收消息时可前进已
+观察版本，但不静默重设已排队上传的基准。正文端点仍检查当前方向、会话和设备授权。
+持久化写入意图、skipped 确认、敏感私有收件箱和本地 generation 检查继续生效。
+
+自定义 `Transport` 新增必需方法 `set_sync_direction`、`ensure_sync_direction`、
+`revoke_sync_direction`；连同新 DTO、错误和 `delivery_revision` 字段，这是 crate 0.4.0
+表示的 Rust API 破坏性变化。Android 保留独立 Kotlin 实现同一份协议，不强制加入 JNI。
 
 ## 开发和消费
 
@@ -69,7 +134,7 @@ python3 tests/server_e2e.py ../rustclipsync-server/target/release/rustclipsync-s
 相邻仓库本地开发可以使用：
 
 ```toml
-rustclipsync-core = { version = "=0.3.0", path = "../rustclipsync-core" }
+rustclipsync-core = { version = "=0.4.0", path = "../rustclipsync-core" }
 ```
 
 源码仓库为 [Infinifar/rustclipsync-core](https://github.com/Infinifar/rustclipsync-core)，以 MIT 许可证公开开源，尚未发布 crates.io 包。为了让 Omaclipsync 的独立检出和源码发布包仍可编译，它消费 `core/vendor/rustclipsync-core` 的自动导出快照：
