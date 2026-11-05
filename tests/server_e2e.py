@@ -60,7 +60,7 @@ def run_once(binary, probe, allow_ws):
             subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost",
                             "-keyout", str(key), "-out", str(cert)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            counts = {"websocket": 0, "blocked": 0, "http_updates": 0}
+            counts = {"websocket": 0, "blocked": 0, "http_updates": 0, "gateway_faults": 0}
             class Proxy(BaseHTTPRequestHandler):
                 protocol_version = "HTTP/1.1"
 
@@ -68,14 +68,22 @@ def run_once(binary, probe, allow_ws):
                     pass
 
                 def forward(self):
+                    if self.command == "GET" and self.path == "/api/state" and not counts["gateway_faults"]:
+                        counts["gateway_faults"] += 1
+                        body = b"disposable gateway error"
+                        self.send_response(530)
+                        self.send_header("Content-Type", "text/plain")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
                     if self.command == "PUT" and self.path.endswith("/sync-direction"):
                         counts["http_updates"] += 1
                     upgrade = self.headers.get("Upgrade", "").lower() == "websocket"
                     if upgrade and not allow_ws:
                         counts["blocked"] += 1
-                        self.send_response(403)
+                        self.send_response(530)
                         self.send_header("Content-Length", "0")
-                        self.send_header("X-RCS-Protocol", "3")
                         self.end_headers()
                         return
                     connection = http.client.HTTPConnection("127.0.0.1", backend, timeout=32)
@@ -129,6 +137,7 @@ def run_once(binary, probe, allow_ws):
             threading.Thread(target=proxy.serve_forever, daemon=True).start()
             env["RCS_CORE_DISPOSABLE_TEST"] = "1"
             subprocess.run([str(probe), f"https://127.0.0.1:{proxy.server_port}"], env=env, check=True, timeout=120)
+            assert counts["gateway_faults"] == 1, "expected one headerless 530 after direction confirmation"
             if allow_ws:
                 assert counts["websocket"] > 0, "probe never established the control WebSocket"
                 assert counts["http_updates"] == 0, "WS updates unexpectedly fell back to HTTP"

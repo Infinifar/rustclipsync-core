@@ -4,7 +4,7 @@ use rustclipsync_core::{
     client::Client,
     direction::SyncDirection,
     session::{Session, SessionConfig, SyncError},
-    state, Filter, FilterMode, Outcome,
+    state, Error, Filter, FilterMode, Outcome,
 };
 use std::{
     cell::RefCell,
@@ -88,7 +88,13 @@ fn main() {
         state::random_key().unwrap(),
     );
     let mut b = open(&base, store.clone(), selection.clone(), key);
+    assert!(
+        matches!(a.check(), Err(SyncError::Remote(Error::Status(530)))),
+        "the gateway outage must remain retryable after direction confirmation"
+    );
+    let identity = a.persisted.state.device_id.clone();
     a.check().unwrap();
+    assert_eq!(a.persisted.state.device_id, identity);
     b.check().unwrap();
     for text in ["offline-first", "offline-last 中文 😀"] {
         copy(&mut a, text);
@@ -156,5 +162,5 @@ fn main() {
     a.flush(0).unwrap();
     assert!(matches!(b.flush(0), Err(SyncError::Conflict)));
     assert_eq!(selection.0.borrow().as_ref().unwrap().0, "competing local");
-    println!("PASS: real HTTPS registration, latest-only synchronization, idempotency, clear/restart, echo, sensitive policy and conflict");
+    println!("PASS: gateway recovery, real HTTPS registration, latest-only synchronization, idempotency, clear/restart, echo, sensitive policy and conflict");
 }
